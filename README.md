@@ -12,12 +12,27 @@ Zero dependências: só precisa de **Node.js 22.13+** (usa o SQLite que já vem 
   - Pausar/ativar um comercial individualmente, ou removê-lo sem perder o histórico.
   - Pode colar só o número de WhatsApp (`5511999999999`), que vira `https://wa.me/...` automaticamente.
   - Ao editar percentuais, o balanceamento recomeça do zero com a nova meta.
-- **Links com UTM**: `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term`, `src`, `sck`, com prévia da URL final.
+- **Links com UTM**: `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term`, `src`, `sck` e **`coupon` (cupom Hubla)**, com prévia da URL final.
   - Opção de repassar parâmetros recebidos (ex: `fbclid`, `gclid`) para o destino.
 - **Análise**: cliques, pessoas únicas, distribuição real × meta por comercial, cliques por dia, origem, dispositivo, horário e últimos acessos, além de exportação CSV.
   - Prévias de robôs (WhatsApp, Facebook, Telegram…) são **filtradas** e não contam nem consomem a rotação.
 
-## Rodando
+## Deploy no Easypanel
+
+1. **Create Service → App**.
+2. **Source**: GitHub (este repositório) com **Build: Dockerfile**. Sem GitHub, dá para subir a imagem pronta em *Docker Image*.
+3. **Environment**:
+   ```
+   APP_PASSWORD=sua-senha-forte
+   BASE_URL=https://links.belaflor.com.br
+   ```
+4. **Mounts → Volume**: name `data`, mount path **`/app/data`**. *Sem isso, os links e cliques se perdem a cada deploy.*
+5. **Domains**: aponte o domínio para a **porta 3000** (o HTTPS é feito pelo Easypanel).
+6. Deploy e acesse `https://seu-dominio/admin`.
+
+O container tem healthcheck em `/health`.
+
+## Rodando local
 
 ```bash
 cp .env.example .env     # edite APP_PASSWORD e BASE_URL

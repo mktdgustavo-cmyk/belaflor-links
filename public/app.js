@@ -10,6 +10,7 @@
     ['utm_term', 'Term', 'ex: palavra-chave, publico'],
     ['src', 'src', 'parâmetro src (ex: Hotmart/Kiwify)'],
     ['sck', 'sck', 'parâmetro sck (ex: Hotmart/Kiwify)'],
+    ['coupon', 'Cupom Hubla', 'código do cupom (ex: BELAFLOR10)'],
   ];
   const PERIODS = [[1, 'Hoje'], [7, '7 dias'], [30, '30 dias'], [90, '90 dias'], [0, 'Tudo']];
   let BASE = location.origin;
@@ -186,7 +187,7 @@
         <div class="card card-pad">
           ${isNew ? `<div class="type-cards">
             <button type="button" class="type-card" data-type="rotator"><div class="t">🔄 Rotação de comerciais</div><div class="d">Um link só que distribui as pessoas entre vários destinos (ex: WhatsApp de cada vendedor) pelo percentual que você definir.</div></button>
-            <button type="button" class="type-card" data-type="simple"><div class="t">🔗 Link encurtado com UTM</div><div class="d">Encurta uma URL e adiciona source, medium, campaign, content, term, src e sck automaticamente.</div></button>
+            <button type="button" class="type-card" data-type="simple"><div class="t">🔗 Link encurtado com UTM</div><div class="d">Encurta uma URL e adiciona source, medium, campaign, content, term, src, sck e cupom (coupon) automaticamente.</div></button>
           </div>` : ''}
           <div class="form-grid">
             <div class="field"><label for="f-name">Nome do link</label>
@@ -215,7 +216,7 @@
         </div>
 
         <div class="card card-pad">
-          <div class="card-head"><div><h2>Parâmetros UTM <span class="muted" style="font-weight:400">(opcional)</span></h2>
+          <div class="card-head"><div><h2>Parâmetros UTM e cupom <span class="muted" style="font-weight:400">(opcional)</span></h2>
             <div class="muted small">Adicionados automaticamente na URL de destino.</div></div></div>
           <div class="form-grid">
             ${UTM.map(([k, label, ph]) => `<div class="field"><label for="u-${k}">${label} <span class="opt mono">${k}</span></label>

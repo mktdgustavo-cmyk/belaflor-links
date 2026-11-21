@@ -34,7 +34,7 @@ const STICKY_DAYS = Number(process.env.STICKY_DAYS || 90);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const RESERVED = new Set(['admin', 'api', 'assets', 'static', 'health', 'favicon.ico', 'robots.txt', 'login', 'logout']);
-const UTM_FIELDS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'src', 'sck'];
+const UTM_FIELDS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'src', 'sck', 'coupon'];
 
 // ---------------------------------------------------------------- database
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS links (
   type TEXT NOT NULL CHECK (type IN ('simple','rotator')),
   name TEXT NOT NULL DEFAULT '',
   target_url TEXT,
-  utm_source TEXT, utm_medium TEXT, utm_campaign TEXT, utm_content TEXT, utm_term TEXT, src TEXT, sck TEXT,
+  utm_source TEXT, utm_medium TEXT, utm_campaign TEXT, utm_content TEXT, utm_term TEXT, src TEXT, sck TEXT, coupon TEXT,
   sticky INTEGER NOT NULL DEFAULT 1,
   forward_params INTEGER NOT NULL DEFAULT 1,
   active INTEGER NOT NULL DEFAULT 1,
@@ -84,6 +84,11 @@ CREATE INDEX IF NOT EXISTS idx_clicks_link_ts ON clicks(link_id, is_bot, ts);
 CREATE INDEX IF NOT EXISTS idx_clicks_ts ON clicks(ts);
 CREATE INDEX IF NOT EXISTS idx_dest_link ON destinations(link_id);
 `);
+// migrações: adiciona colunas novas em bancos já existentes
+{
+  const cols = new Set(db.prepare('PRAGMA table_info(links)').all().map((c) => c.name));
+  if (!cols.has('coupon')) db.exec('ALTER TABLE links ADD COLUMN coupon TEXT');
+}
 
 function tx(fn) {
   db.exec('BEGIN IMMEDIATE');
