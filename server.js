@@ -36,6 +36,12 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const RESERVED = new Set(['admin', 'api', 'assets', 'static', 'health', 'favicon.ico', 'robots.txt', 'login', 'logout']);
 const UTM_FIELDS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'src', 'sck', 'coupon'];
 
+function cleanUtm(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim().slice(0, 200);
+  return s || null;
+}
+
 // ---------------------------------------------------------------- database
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
@@ -88,6 +94,22 @@ CREATE INDEX IF NOT EXISTS idx_dest_link ON destinations(link_id);
 {
   const cols = new Set(db.prepare('PRAGMA table_info(links)').all().map((c) => c.name));
   if (!cols.has('coupon')) db.exec('ALTER TABLE links ADD COLUMN coupon TEXT');
+
+  // UTMs recebidas em cada acesso (ex: /comercial?utm_source=facebook)
+  const ccols = new Set(db.prepare('PRAGMA table_info(clicks)').all().map((c) => c.name));
+  const missing = UTM_FIELDS.filter((f) => !ccols.has(f));
+  if (missing.length) {
+    for (const f of missing) db.exec(`ALTER TABLE clicks ADD COLUMN ${f} TEXT`);
+    // preenche os cliques antigos a partir da query string já gravada
+    const upd = db.prepare(`UPDATE clicks SET ${UTM_FIELDS.map((f) => `${f} = ?`).join(', ')} WHERE id = ?`);
+    db.exec('BEGIN');
+    for (const r of db.prepare('SELECT id, query FROM clicks WHERE query IS NOT NULL').all()) {
+      const sp = new URLSearchParams(r.query);
+      upd.run(...UTM_FIELDS.map((f) => cleanUtm(sp.get(f))), r.id);
+    }
+    db.exec('COMMIT');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_clicks_link_source ON clicks(link_id, utm_source)');
 }
 
 function tx(fn) {
@@ -104,8 +126,8 @@ const q = {
   liveDests: db.prepare('SELECT * FROM destinations WHERE link_id = ? AND deleted = 0 ORDER BY position, id'),
   allDests: db.prepare('SELECT * FROM destinations WHERE link_id = ? ORDER BY deleted, position, id'),
   incRR: db.prepare('UPDATE destinations SET rr_count = rr_count + 1 WHERE id = ?'),
-  insertClick: db.prepare(`INSERT INTO clicks (link_id, destination_id, ts, visitor_id, ip_hash, user_agent, referer, device, is_bot, sticky_hit, query)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`),
+  insertClick: db.prepare(`INSERT INTO clicks (link_id, destination_id, ts, visitor_id, ip_hash, user_agent, referer, device, is_bot, sticky_hit, query, ${UTM_FIELDS.join(', ')})
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,${UTM_FIELDS.map(() => '?').join(',')})`),
 };
 
 // ---------------------------------------------------------------- helpers
@@ -317,7 +339,8 @@ function handleRedirect(req, res, slug, searchParams) {
   const query = searchParams && [...searchParams.keys()].length ? searchParams.toString().slice(0, 500) : null;
 
   try {
-    q.insertClick.run(link.id, destId, Date.now(), vid, ipHash, ua, refHost, deviceOf(ua), bot ? 1 : 0, stickyHit, query);
+    q.insertClick.run(link.id, destId, Date.now(), vid, ipHash, ua, refHost, deviceOf(ua), bot ? 1 : 0, stickyHit, query,
+      ...UTM_FIELDS.map((f) => cleanUtm(searchParams && searchParams.get(f))));
   } catch (e) { console.error('Erro ao registrar clique:', e.message); }
 
   const headers = { Location: finalUrl, 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Referrer-Policy': 'no-referrer-when-downgrade' };
@@ -457,7 +480,26 @@ function linkStats(id, days) {
   const referers = db.prepare(`SELECT COALESCE(NULLIF(referer,''),'(direto / app)') ref, COUNT(*) n ${W} GROUP BY ref ORDER BY n DESC LIMIT 10`).all(id, since);
   const devices = db.prepare(`SELECT device, COUNT(*) n ${W} GROUP BY device ORDER BY n DESC`).all(id, since);
   const hours = db.prepare(`SELECT CAST(strftime('%H', (ts + ${OFF_MS}) / 1000, 'unixepoch') AS INTEGER) h, COUNT(*) n ${W} GROUP BY h`).all(id, since);
-  const recent = db.prepare('SELECT ts, destination_id, device, referer, is_bot, sticky_hit, query FROM clicks WHERE link_id = ? ORDER BY id DESC LIMIT 40').all(id);
+  const recent = db.prepare(`SELECT ts, destination_id, device, referer, is_bot, sticky_hit, query, ${UTM_FIELDS.join(', ')} FROM clicks WHERE link_id = ? ORDER BY id DESC LIMIT 40`).all(id);
+
+  // UTMs recebidas no acesso: ranking por campo e por combinação source / medium / campaign
+  const utmTagged = db.prepare(`SELECT COUNT(*) n ${W} AND (${UTM_FIELDS.map((f) => `${f} IS NOT NULL`).join(' OR ')})`).get(id, since).n;
+  const utm = {};
+  const isRot = link.type === 'rotator';
+  for (const f of [...UTM_FIELDS, 'combo']) {
+    const key = f === 'combo'
+      ? "COALESCE(utm_source,'') || ' / ' || COALESCE(utm_medium,'') || ' / ' || COALESCE(utm_campaign,'')"
+      : `COALESCE(${f},'')`;
+    const rows = db.prepare(`SELECT ${key} v, COUNT(*) clicks, COUNT(DISTINCT visitor_id) uniques ${W} GROUP BY v ORDER BY clicks DESC LIMIT 30`).all(id, since);
+    if (isRot && rows.length) {
+      const idx = new Map(rows.map((r) => [r.v, Object.assign(r, { byDest: {} })]));
+      for (const r of db.prepare(`SELECT ${key} v, destination_id d, COUNT(*) n ${W} GROUP BY v, d`).all(id, since)) {
+        const row = idx.get(r.v);
+        if (row) row.byDest[r.d] = r.n;
+      }
+    }
+    utm[f] = f === 'combo' && rows.every((r) => r.v === ' /  / ') ? [] : rows;
+  }
 
   // série diária completa (preenche dias sem clique)
   let firstDay;
@@ -495,7 +537,7 @@ function linkStats(id, days) {
   return {
     link: linkPayload(link), days,
     totals: { clicks: totals.clicks, uniques: totals.uniques, bots, sticky_hits: stickyHits },
-    series, destinations, referers, devices,
+    series, destinations, referers, devices, utm, utm_tagged: utmTagged,
     hours: Array.from({ length: 24 }, (_, h) => hours.find((x) => x.h === h)?.n || 0),
     recent: recent.map((r) => ({ ...r, when: localDateTimeStr(r.ts) })),
   };
@@ -509,9 +551,9 @@ function exportCsv(res, id) {
   const link = q.linkById.get(id);
   if (!link) return json(res, 404, { error: 'Link não encontrado' });
   const dests = new Map(q.allDests.all(id).map((d) => [d.id, d.label]));
-  const lines = [['data_hora', 'destino', 'visitante', 'dispositivo', 'origem', 'bot', 'mesmo_comercial', 'parametros', 'user_agent'].join(';')];
+  const lines = [['data_hora', 'destino', 'visitante', 'dispositivo', 'origem', 'bot', 'mesmo_comercial', ...UTM_FIELDS, 'parametros', 'user_agent'].join(';')];
   for (const r of db.prepare('SELECT * FROM clicks WHERE link_id = ? ORDER BY id').iterate(id)) {
-    lines.push([localDateTimeStr(r.ts), r.destination_id ? dests.get(r.destination_id) : link.target_url, r.visitor_id, r.device, r.referer, r.is_bot ? 'sim' : 'nao', r.sticky_hit ? 'sim' : 'nao', r.query, r.user_agent].map(csvCell).join(';'));
+    lines.push([localDateTimeStr(r.ts), r.destination_id ? dests.get(r.destination_id) : link.target_url, r.visitor_id, r.device, r.referer, r.is_bot ? 'sim' : 'nao', r.sticky_hit ? 'sim' : 'nao', ...UTM_FIELDS.map((f) => r[f]), r.query, r.user_agent].map(csvCell).join(';'));
   }
   send(res, 200, '﻿' + lines.join('\n'), {
     'Content-Type': 'text/csv; charset=utf-8',

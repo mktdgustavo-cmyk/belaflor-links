@@ -14,6 +14,9 @@ Zero dependências: só precisa de **Node.js 22.13+** (usa o SQLite que já vem 
   - Ao editar percentuais, o balanceamento recomeça do zero com a nova meta.
 - **Links com UTM**: `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term`, `src`, `sck` e **`coupon` (cupom Hubla)**, com prévia da URL final.
   - Opção de repassar parâmetros recebidos (ex: `fbclid`, `gclid`) para o destino.
+- **Grava as UTMs recebidas**: quem acessa `links.../comercial?utm_source=facebook&utm_campaign=bf26` tem `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term`, `src`, `sck` e `coupon` salvos no clique.
+  - O painel mostra o ranking por campo e por combinação source / medium / campaign. Na rotação, mostra também quantos leads de cada UTM foram para cada comercial.
+  - As UTMs saem no CSV e na lista de últimos acessos.
 - **Análise**: cliques, pessoas únicas, distribuição real × meta por comercial, cliques por dia, origem, dispositivo, horário e últimos acessos, além de exportação CSV.
   - Prévias de robôs (WhatsApp, Facebook, Telegram…) são **filtradas** e não contam nem consomem a rotação.
 

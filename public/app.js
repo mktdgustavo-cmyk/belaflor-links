@@ -14,7 +14,8 @@
   ];
   const PERIODS = [[1, 'Hoje'], [7, '7 dias'], [30, '30 dias'], [90, '90 dias'], [0, 'Tudo']];
   let BASE = location.origin;
-  const state = { listFilter: 'all', search: '', days: Number(localStorageGet('bf_days') ?? 30) };
+  const UTM_TABS = [['combo', 'Source / Medium / Campaign'], ['utm_source', 'Source'], ['utm_medium', 'Medium'], ['utm_campaign', 'Campaign'], ['utm_content', 'Content'], ['utm_term', 'Term'], ['src', 'src'], ['sck', 'sck'], ['coupon', 'Cupom']];
+  const state = { utmTab: 'combo', listFilter: 'all', search: '', days: Number(localStorageGet('bf_days') ?? 30) };
 
   // ------------------------------------------------------------- utils
   function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -375,6 +376,10 @@
     });
     return `<div class="chart"><svg viewBox="0 0 ${W} ${H}">${g}</svg></div>`;
   }
+  function utmBadges(r) {
+    const short = { utm_source: 'source', utm_medium: 'medium', utm_campaign: 'campaign', utm_content: 'content', utm_term: 'term', src: 'src', sck: 'sck', coupon: 'cupom' };
+    return Object.keys(short).filter((k) => r[k]).map((k) => `<span class="badge badge-utm" style="margin:1px 2px 1px 0">${short[k]}: ${esc(r[k])}</span>`).join('');
+  }
   function listRows(items, labelKey, total) {
     if (!items.length) return '<div class="muted small">Sem dados no período.</div>';
     const max = Math.max(...items.map((i) => i.n));
@@ -450,6 +455,15 @@
         ${utmSet.length ? `<div class="toolbar" style="margin-top:10px;gap:6px">${utmSet.map(([k, v]) => `<span class="badge badge-utm">${esc(k)}=${esc(v)}</span>`).join('')}</div>` : ''}
       </div>`}
 
+      <div class="card">
+        <div class="card-pad" style="padding-bottom:10px">
+          <div class="card-head" style="margin-bottom:10px"><div><h2>UTMs recebidas</h2>
+            <div class="muted small">Parâmetros que vieram no link acessado (ex: <span class="mono">/${esc(l.slug)}?utm_source=facebook&amp;utm_campaign=…</span>). ${fmt(s.utm_tagged)} de ${fmt(total)} cliques (${pct(total ? s.utm_tagged / total * 100 : 0)}) chegaram com UTM.</div></div></div>
+          <div class="segmented" id="utmtabs">${UTM_TABS.map(([k, t]) => `<button data-k="${k}" class="${k === state.utmTab ? 'on' : ''}">${t}</button>`).join('')}</div>
+        </div>
+        <div class="table-wrap" id="utmtable"></div>
+      </div>
+
       <div class="card card-pad">
         <div class="card-head"><h2>Cliques por dia</h2></div>
         ${barChart(s.series, l.type === 'rotator' ? dests : null)}
@@ -465,19 +479,39 @@
       <div class="card">
         <div class="card-pad" style="padding-bottom:8px"><h2>Últimos acessos</h2></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Quando</th>${l.type === 'rotator' ? '<th>Destino</th>' : ''}<th>Dispositivo</th><th>Origem</th><th>Parâmetros</th><th></th></tr></thead>
+          <thead><tr><th>Quando</th>${l.type === 'rotator' ? '<th>Destino</th>' : ''}<th>Dispositivo</th><th>Origem</th><th>UTMs recebidas</th><th></th></tr></thead>
           <tbody>${s.recent.length ? s.recent.map((r) => `<tr>
             <td class="nowrap">${esc(r.when.split(' ')[0].split('-').reverse().join('/'))} ${esc(r.when.split(' ')[1])}</td>
             ${l.type === 'rotator' ? `<td>${esc(dests.find((d) => d.id === r.destination_id)?.label || '—')}</td>` : ''}
             <td>${esc(devLabel[r.device] || r.device || '—')}</td>
             <td>${esc(r.referer || '(direto / app)')}</td>
-            <td class="mono small" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.query || '')}</td>
+            <td class="small" title="${esc(r.query || '')}">${utmBadges(r) || `<span class="muted">${r.query ? esc(r.query.slice(0, 60)) : '—'}</span>`}</td>
             <td>${r.is_bot ? '<span class="badge badge-off">robô/prévia</span>' : r.sticky_hit ? '<span class="badge badge-rot">retorno</span>' : ''}</td>
           </tr>`).join('') : `<tr><td colspan="6"><div class="empty">Nenhum acesso ainda. Compartilhe o link: <span class="mono">${esc(url)}</span></div></td></tr>`}</tbody>
         </table></div>
       </div>`);
 
     $$('#period button').forEach((b) => b.onclick = () => { state.days = Number(b.dataset.d); localStorageSet('bf_days', state.days); renderStats(id); });
+    const drawUtm = () => {
+      $$('#utmtabs button').forEach((b) => b.classList.toggle('on', b.dataset.k === state.utmTab));
+      const rows = s.utm[state.utmTab] || [];
+      const rot = l.type === 'rotator' && dests.length;
+      const label = (v) => {
+        if (state.utmTab === 'combo') return v.split(' / ').map((x) => x ? esc(x) : '<span class="muted">—</span>').join(' <span class="muted">/</span> ');
+        return v ? esc(v) : '<span class="muted"><i>(sem UTM)</i></span>';
+      };
+      const anyTagged = rows.some((r) => state.utmTab === 'combo' ? r.v !== ' /  / ' : r.v);
+      $('#utmtable').innerHTML = !rows.length || !anyTagged
+        ? `<div class="empty" style="padding:28px">Nenhum clique com ${state.utmTab === 'combo' ? 'UTM' : `<span class="mono">${esc(state.utmTab)}</span>`} no período.<br><span class="small">Exemplo: <span class="mono">${esc(url)}?utm_source=instagram&amp;utm_medium=stories&amp;utm_campaign=bf26</span></span></div>`
+        : `<table><thead><tr><th>${esc(UTM_TABS.find(([k]) => k === state.utmTab)[1])}</th><th class="num">Cliques</th><th class="num">%</th><th class="num">Pessoas</th>
+            ${rot ? dests.map((d) => `<th class="num nowrap"><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${d.color};margin-right:4px"></i>${esc(d.label)}</th>`).join('') : ''}</tr></thead>
+          <tbody>${rows.map((r) => `<tr><td style="max-width:420px;word-break:break-word">${label(r.v)}</td>
+            <td class="num"><b>${fmt(r.clicks)}</b></td><td class="num muted">${pct(total ? r.clicks / total * 100 : 0)}</td><td class="num">${fmt(r.uniques)}</td>
+            ${rot ? dests.map((d) => `<td class="num">${r.byDest && r.byDest[d.id] ? fmt(r.byDest[d.id]) : '<span class="muted">0</span>'}</td>`).join('') : ''}</tr>`).join('')}</tbody></table>`;
+    };
+    $$('#utmtabs button').forEach((b) => b.onclick = () => { state.utmTab = b.dataset.k; drawUtm(); });
+    drawUtm();
+
     $('#toggle').onclick = async () => { await api(`/api/links/${id}/toggle`, { method: 'POST' }); toast(l.active ? 'Link pausado' : 'Link ativado'); renderStats(id); };
   }
 
