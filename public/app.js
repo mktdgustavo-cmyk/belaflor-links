@@ -14,6 +14,7 @@
   ];
   const PERIODS = [[1, 'Hoje'], [7, '7 dias'], [30, '30 dias'], [90, '90 dias'], [0, 'Tudo']];
   let BASE = location.origin;
+  const WA_VARS = [['codigo', 'código do lead'], ['comercial', 'nome do comercial'], ['utm_source', 'source'], ['utm_medium', 'medium'], ['utm_campaign', 'campaign'], ['utm_content', 'content'], ['utm_term', 'term'], ['cupom', 'cupom']];
   const UTM_TABS = [['combo', 'Source / Medium / Campaign'], ['utm_source', 'Source'], ['utm_medium', 'Medium'], ['utm_campaign', 'Campaign'], ['utm_content', 'Content'], ['utm_term', 'Term'], ['src', 'src'], ['sck', 'sck'], ['coupon', 'Cupom']];
   const state = { utmTab: 'combo', listFilter: 'all', search: '', days: Number(localStorageGet('bf_days') ?? 30) };
 
@@ -137,7 +138,13 @@
         </tr>`).join('') : `<tr><td colspan="8"><div class="empty">${links.length ? 'Nenhum link encontrado com esse filtro.' : '<h3>Nenhum link ainda</h3>Crie seu primeiro link de rotação ou link com UTM.<br><br><a class="btn btn-primary" href="#/novo">+ Novo link</a>'}</div></td></tr>`;
     };
     shell(`
-      <div class="page-head"><div><h1>Links</h1><div class="sub muted">Cliques de robôs/prévias (WhatsApp, Facebook…) não entram na contagem.</div></div></div>
+      <div class="page-head"><div><h1>Links</h1><div class="sub muted">Cliques de robôs/prévias (WhatsApp, Facebook…) não entram na contagem.</div></div>
+        <div class="toolbar">
+          <form id="lookup" class="toolbar" style="gap:6px"><input type="search" id="code" placeholder="Código do lead (ex: K7Q3X)" style="width:210px" autocomplete="off"><button class="btn">Buscar</button></form>
+          <a class="btn" href="/api/leads.csv" title="Todos os leads de todos os links: código, comercial e UTMs">Exportar todos os leads</a>
+        </div>
+      </div>
+      <div id="lookup-result"></div>
       <div class="grid grid-4">
         <div class="card stat"><div class="label">Cliques hoje</div><div class="value">${fmt(summary.today)}</div></div>
         <div class="card stat"><div class="label">Últimos 7 dias</div><div class="value">${fmt(summary.d7)}</div></div>
@@ -161,6 +168,27 @@
     const seg = () => $$('#seg button').forEach((b) => b.classList.toggle('on', b.dataset.f === state.listFilter));
     $$('#seg button').forEach((b) => b.onclick = () => { state.listFilter = b.dataset.f; seg(); draw(); });
     $('#q').oninput = (e) => { state.search = e.target.value; draw(); };
+    $('#lookup').onsubmit = async (e) => {
+      e.preventDefault();
+      const code = $('#code').value.trim();
+      if (!code) return;
+      const box = $('#lookup-result');
+      try {
+        const r = await api(`/api/lookup?code=${encodeURIComponent(code)}`);
+        box.innerHTML = `<div class="card card-pad" style="margin-bottom:16px">
+          <div class="card-head" style="margin-bottom:8px"><h2>Lead <span class="mono">${esc(r.lead_code)}</span></h2>
+            <button class="btn btn-ghost btn-sm" id="lk-close">Fechar</button></div>
+          <div class="grid grid-4" style="gap:12px">
+            <div><div class="muted small">Comercial</div><b>${esc(r.dest_label || '—')}</b></div>
+            <div><div class="muted small">Link</div><a href="#/link/${r.link_id}">${esc(r.link_name)}</a></div>
+            <div><div class="muted small">Primeiro acesso</div>${esc(r.first.split(' ')[0].split('-').reverse().join('/'))} ${esc(r.first.split(' ')[1])}</div>
+            <div><div class="muted small">Cliques</div>${fmt(r.clicks)}</div>
+          </div>
+          <div style="margin-top:12px">${utmBadges(r) || '<span class="muted small">Chegou sem UTM.</span>'}</div>
+        </div>`;
+        $('#lk-close').onclick = () => { box.innerHTML = ''; };
+      } catch (err) { if (err.message !== 'auth') { box.innerHTML = ''; toast(err.message, true); } }
+    };
     seg(); draw();
   }
 
@@ -169,6 +197,7 @@
     loading();
     let link = {
       type: 'rotator', name: '', slug: '', target_url: '', sticky: true, forward_params: true, active: true,
+      wa_message: 'Olá! Vim pelo link da Bela Flor e gostaria de mais informações. (Código: {codigo})',
       utm: Object.fromEntries(UTM.map(([k]) => [k, ''])),
       destinations: [1, 2, 3, 4, 5].map((n) => ({ label: `Comercial ${n}`, url: '', weight: 20, active: true })),
     };
@@ -214,6 +243,16 @@
             <label class="check"><input type="checkbox" id="f-sticky" ${link.sticky ? 'checked' : ''}>
               <span><b>Manter a mesma pessoa no mesmo comercial</b><br><span class="muted small">Se o lead clicar de novo (no mesmo aparelho), cai no mesmo vendedor e não consome a vez de outro.</span></span></label>
           </div>
+        </div>
+
+        <div class="card card-pad">
+          <div class="card-head"><div><h2>Mensagem automática no WhatsApp <span class="muted" style="font-weight:400">(opcional)</span></h2>
+            <div class="muted small">Quando o destino é um link de WhatsApp, o lead já abre a conversa com esta mensagem escrita.
+            Use <span class="mono">{codigo}</span> para identificar o lead depois na exportação (código → comercial → UTM).</div></div></div>
+          <textarea id="f-wa" rows="3" placeholder="Deixe vazio para não alterar a mensagem">${esc(link.wa_message || '')}</textarea>
+          <div class="toolbar" style="gap:6px;margin-top:8px"><span class="muted small">Inserir:</span>
+            ${WA_VARS.map(([k, t]) => `<button type="button" class="chip" data-var="${k}" title="${esc(t)}">{${k}}</button>`).join('')}</div>
+          <div class="field" style="margin:12px 0 0"><label>Prévia (exemplo)</label><div class="preview" id="wa-preview"></div></div>
         </div>
 
         <div class="card card-pad">
@@ -314,6 +353,7 @@
         target_url: $('#f-target').value,
         utm: utmVals(),
         sticky: $('#f-sticky').checked, forward_params: $('#f-forward').checked, active: $('#f-active').checked,
+        wa_message: $('#f-wa').value,
         destinations: type === 'rotator' ? dests.map((d) => ({ id: d.id, label: d.label, url: d.url, weight: Number(d.weight) || 0, active: !!d.active })) : undefined,
       };
       if (type === 'rotator' && !isNew && link.type === 'rotator' &&
@@ -326,7 +366,22 @@
       } catch (err) { if (err.message !== 'auth') toast(err.message, true); $('#save').disabled = false; }
     };
 
-    setType(type); drawDests(); drawPreview();
+    const drawWa = () => {
+      const u = utmVals();
+      const sample = { codigo: 'K7Q3X', comercial: (type === 'rotator' ? dests.find((d) => d.active)?.label : '') || 'Comercial 1', cupom: u.coupon || '', ...u };
+      const txt = $('#f-wa').value.replace(/\{\s*([a-z_]+)\s*\}/gi, (m, k) => (k.toLowerCase() in sample ? sample[k.toLowerCase()] || (k.toLowerCase().startsWith('utm_') ? `[${k}]` : '') : m)).trim();
+      $('#wa-preview').textContent = txt || '(sem mensagem automática)';
+    };
+    $('#f-wa').addEventListener('input', drawWa);
+    $$('[data-utm]').forEach((i) => i.addEventListener('input', drawWa));
+    $$('[data-var]').forEach((b) => b.onclick = () => {
+      const ta = $('#f-wa'), ins = `{${b.dataset.var}}`;
+      const a = ta.selectionStart ?? ta.value.length, z = ta.selectionEnd ?? ta.value.length;
+      ta.value = ta.value.slice(0, a) + ins + ta.value.slice(z);
+      ta.focus(); ta.selectionStart = ta.selectionEnd = a + ins.length; drawWa();
+    });
+
+    setType(type); drawDests(); drawPreview(); drawWa();
   }
 
   // ------------------------------------------------------------- stats
@@ -414,7 +469,8 @@
         <div class="toolbar">
           <div class="segmented" id="period">${PERIODS.map(([d, t]) => `<button data-d="${d}" class="${d === state.days ? 'on' : ''}">${t}</button>`).join('')}</div>
           <button class="btn" id="toggle">${l.active ? 'Pausar' : 'Ativar'}</button>
-          <a class="btn" href="/api/links/${l.id}/clicks.csv">Exportar CSV</a>
+          <a class="btn" href="/api/links/${l.id}/leads.csv" title="Uma linha por lead: código, comercial e UTMs">Exportar leads</a>
+          <a class="btn btn-ghost" href="/api/links/${l.id}/clicks.csv" title="Todos os cliques, um por linha">CSV de cliques</a>
           <a class="btn btn-primary" href="#/link/${l.id}/editar">Editar</a>
         </div>
       </div>
@@ -479,15 +535,16 @@
       <div class="card">
         <div class="card-pad" style="padding-bottom:8px"><h2>Últimos acessos</h2></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Quando</th>${l.type === 'rotator' ? '<th>Destino</th>' : ''}<th>Dispositivo</th><th>Origem</th><th>UTMs recebidas</th><th></th></tr></thead>
+          <thead><tr><th>Quando</th><th>Código</th>${l.type === 'rotator' ? '<th>Destino</th>' : ''}<th>Dispositivo</th><th>Origem</th><th>UTMs recebidas</th><th></th></tr></thead>
           <tbody>${s.recent.length ? s.recent.map((r) => `<tr>
             <td class="nowrap">${esc(r.when.split(' ')[0].split('-').reverse().join('/'))} ${esc(r.when.split(' ')[1])}</td>
+            <td class="mono nowrap">${r.lead_code ? `<b>${esc(r.lead_code)}</b>` : '<span class="muted">—</span>'}</td>
             ${l.type === 'rotator' ? `<td>${esc(dests.find((d) => d.id === r.destination_id)?.label || '—')}</td>` : ''}
             <td>${esc(devLabel[r.device] || r.device || '—')}</td>
             <td>${esc(r.referer || '(direto / app)')}</td>
             <td class="small" title="${esc(r.query || '')}">${utmBadges(r) || `<span class="muted">${r.query ? esc(r.query.slice(0, 60)) : '—'}</span>`}</td>
             <td>${r.is_bot ? '<span class="badge badge-off">robô/prévia</span>' : r.sticky_hit ? '<span class="badge badge-rot">retorno</span>' : ''}</td>
-          </tr>`).join('') : `<tr><td colspan="6"><div class="empty">Nenhum acesso ainda. Compartilhe o link: <span class="mono">${esc(url)}</span></div></td></tr>`}</tbody>
+          </tr>`).join('') : `<tr><td colspan="7"><div class="empty">Nenhum acesso ainda. Compartilhe o link: <span class="mono">${esc(url)}</span></div></td></tr>`}</tbody>
         </table></div>
       </div>`);
 

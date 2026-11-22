@@ -110,6 +110,12 @@ CREATE INDEX IF NOT EXISTS idx_dest_link ON destinations(link_id);
     db.exec('COMMIT');
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_clicks_link_source ON clicks(link_id, utm_source)');
+
+  // código do lead (vai na mensagem do WhatsApp) + modelo da mensagem
+  if (!cols.has('wa_message')) db.exec('ALTER TABLE links ADD COLUMN wa_message TEXT');
+  if (!ccols.has('lead_code')) db.exec('ALTER TABLE clicks ADD COLUMN lead_code TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_clicks_lead_code ON clicks(lead_code)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_clicks_visitor ON clicks(link_id, visitor_id)');
 }
 
 function tx(fn) {
@@ -126,8 +132,11 @@ const q = {
   liveDests: db.prepare('SELECT * FROM destinations WHERE link_id = ? AND deleted = 0 ORDER BY position, id'),
   allDests: db.prepare('SELECT * FROM destinations WHERE link_id = ? ORDER BY deleted, position, id'),
   incRR: db.prepare('UPDATE destinations SET rr_count = rr_count + 1 WHERE id = ?'),
-  insertClick: db.prepare(`INSERT INTO clicks (link_id, destination_id, ts, visitor_id, ip_hash, user_agent, referer, device, is_bot, sticky_hit, query, ${UTM_FIELDS.join(', ')})
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,${UTM_FIELDS.map(() => '?').join(',')})`),
+  insertClick: db.prepare(`INSERT INTO clicks (link_id, destination_id, ts, visitor_id, ip_hash, user_agent, referer, device, is_bot, sticky_hit, query, lead_code, ${UTM_FIELDS.join(', ')})
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,${UTM_FIELDS.map(() => '?').join(',')})`),
+  lastLeadCode: db.prepare(`SELECT lead_code FROM clicks WHERE link_id = ? AND visitor_id = ? AND destination_id IS ? AND lead_code IS NOT NULL
+    ORDER BY id DESC LIMIT 1`),
+  codeExists: db.prepare('SELECT 1 FROM clicks WHERE lead_code = ? LIMIT 1'),
 };
 
 // ---------------------------------------------------------------- helpers
@@ -273,6 +282,28 @@ function pickDestination(dests) {
   return best;
 }
 
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function newLeadCode() {
+  for (let tries = 0; tries < 20; tries++) {
+    const bytes = crypto.randomBytes(5);
+    let c = '';
+    for (let i = 0; i < 5; i++) c += CODE_CHARS[bytes[i] % CODE_CHARS.length];
+    if (!q.codeExists.get(c)) return c;
+  }
+  return randomSlug(8).toUpperCase();
+}
+const WA_HOSTS = new Set(['wa.me', 'api.whatsapp.com', 'web.whatsapp.com', 'whatsapp.com', 'www.whatsapp.com']);
+function isWhatsappUrl(u) {
+  try { return WA_HOSTS.has(new URL(u).hostname.toLowerCase()); } catch { return false; }
+}
+/** Troca {codigo}, {comercial}, {utm_source}... pelos valores do clique. */
+function renderMessage(tpl, vars) {
+  return tpl.replace(/\{\s*([a-z_]+)\s*\}/gi, (m, k) => {
+    const key = k.toLowerCase();
+    return key in vars ? (vars[key] || '') : m;
+  }).replace(/[ \t]{2,}/g, ' ').trim();
+}
+
 function buildFinalUrl(target, link, incoming) {
   let u;
   try { u = new URL(target); } catch { return target; }
@@ -332,15 +363,33 @@ function handleRedirect(req, res, slug, searchParams) {
     target = link.target_url;
   }
 
-  const finalUrl = buildFinalUrl(target, link, searchParams);
+  let finalUrl = buildFinalUrl(target, link, searchParams);
+  const incomingUtm = Object.fromEntries(UTM_FIELDS.map((f) => [f, cleanUtm(searchParams && searchParams.get(f))]));
+
+  // código do lead: o mesmo visitante no mesmo destino mantém o código
+  let leadCode = null;
+  if (!bot) {
+    leadCode = q.lastLeadCode.get(link.id, vid, destId)?.lead_code || newLeadCode();
+    if (link.wa_message && isWhatsappUrl(finalUrl)) {
+      const destLabel = destId ? (q.activeDests.all(link.id).find((d) => d.id === destId)?.label || '') : '';
+      const vars = { codigo: leadCode, comercial: destLabel, link: link.name };
+      for (const f of UTM_FIELDS) vars[f] = incomingUtm[f] || link[f] || '';
+      vars.cupom = vars.coupon;
+      try {
+        const u = new URL(finalUrl);
+        u.searchParams.set('text', renderMessage(link.wa_message, vars));
+        finalUrl = u.toString();
+      } catch {}
+    }
+  }
   let refHost = '';
   try { if (req.headers.referer) refHost = new URL(req.headers.referer).hostname; } catch {}
   const ipHash = crypto.createHash('sha256').update(SESSION_SECRET + clientIp(req)).digest('hex').slice(0, 16);
   const query = searchParams && [...searchParams.keys()].length ? searchParams.toString().slice(0, 500) : null;
 
   try {
-    q.insertClick.run(link.id, destId, Date.now(), vid, ipHash, ua, refHost, deviceOf(ua), bot ? 1 : 0, stickyHit, query,
-      ...UTM_FIELDS.map((f) => cleanUtm(searchParams && searchParams.get(f))));
+    q.insertClick.run(link.id, destId, Date.now(), vid, ipHash, ua, refHost, deviceOf(ua), bot ? 1 : 0, stickyHit, query, leadCode,
+      ...UTM_FIELDS.map((f) => incomingUtm[f]));
   } catch (e) { console.error('Erro ao registrar clique:', e.message); }
 
   const headers = { Location: finalUrl, 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Referrer-Policy': 'no-referrer-when-downgrade' };
@@ -378,6 +427,7 @@ function validateLink(b, existingId = 0) {
     const v = String((b.utm && b.utm[f]) ?? b[f] ?? '').trim().slice(0, 300);
     out[f] = v || null;
   }
+  out.wa_message = String(b.wa_message || '').trim().slice(0, 1000) || null;
 
   if (type === 'simple') {
     const u = normalizeUrl(b.target_url);
@@ -403,7 +453,7 @@ function validateLink(b, existingId = 0) {
 function saveLink(data, id = null) {
   return tx(() => {
     const now = Date.now();
-    const cols = ['slug', 'type', 'name', 'target_url', ...UTM_FIELDS, 'sticky', 'forward_params', 'active'];
+    const cols = ['slug', 'type', 'name', 'target_url', ...UTM_FIELDS, 'wa_message', 'sticky', 'forward_params', 'active'];
     const vals = cols.map((c) => data[c]);
     if (id) {
       db.prepare(`UPDATE links SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...vals, now, id);
@@ -439,6 +489,7 @@ function saveLink(data, id = null) {
 function linkPayload(link) {
   const out = { ...link, sticky: !!link.sticky, forward_params: !!link.forward_params, active: !!link.active, utm: {} };
   for (const f of UTM_FIELDS) out.utm[f] = link[f] || '';
+  out.wa_message = link.wa_message || '';
   if (link.type === 'rotator') out.destinations = q.liveDests.all(link.id).map((d) => ({ ...d, active: !!d.active }));
   return out;
 }
@@ -480,7 +531,7 @@ function linkStats(id, days) {
   const referers = db.prepare(`SELECT COALESCE(NULLIF(referer,''),'(direto / app)') ref, COUNT(*) n ${W} GROUP BY ref ORDER BY n DESC LIMIT 10`).all(id, since);
   const devices = db.prepare(`SELECT device, COUNT(*) n ${W} GROUP BY device ORDER BY n DESC`).all(id, since);
   const hours = db.prepare(`SELECT CAST(strftime('%H', (ts + ${OFF_MS}) / 1000, 'unixepoch') AS INTEGER) h, COUNT(*) n ${W} GROUP BY h`).all(id, since);
-  const recent = db.prepare(`SELECT ts, destination_id, device, referer, is_bot, sticky_hit, query, ${UTM_FIELDS.join(', ')} FROM clicks WHERE link_id = ? ORDER BY id DESC LIMIT 40`).all(id);
+  const recent = db.prepare(`SELECT ts, destination_id, device, referer, is_bot, sticky_hit, query, lead_code, ${UTM_FIELDS.join(', ')} FROM clicks WHERE link_id = ? ORDER BY id DESC LIMIT 40`).all(id);
 
   // UTMs recebidas no acesso: ranking por campo e por combinação source / medium / campaign
   const utmTagged = db.prepare(`SELECT COUNT(*) n ${W} AND (${UTM_FIELDS.map((f) => `${f} IS NOT NULL`).join(' OR ')})`).get(id, since).n;
@@ -547,13 +598,46 @@ function csvCell(v) {
   const s = v === null || v === undefined ? '' : String(v);
   return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
+/**
+ * Uma linha por lead (código): comercial que recebeu + UTMs do acesso.
+ * linkId = null exporta todos os links.
+ */
+function leadRows(linkId, since = 0) {
+  return db.prepare(`
+    SELECT c.lead_code, c.ts first_ts, g.last_ts, g.n clicks, c.device, c.referer,
+      l.name link_name, l.slug, l.type, l.target_url, d.label dest_label, d.url dest_url,
+      ${UTM_FIELDS.map((f) => `c.${f}`).join(', ')}
+    FROM (SELECT lead_code, MIN(id) first_id, MAX(ts) last_ts, COUNT(*) n FROM clicks
+          WHERE is_bot = 0 AND lead_code IS NOT NULL AND ts >= ? ${linkId ? 'AND link_id = ?' : ''}
+          GROUP BY lead_code) g
+    JOIN clicks c ON c.id = g.first_id
+    JOIN links l ON l.id = c.link_id
+    LEFT JOIN destinations d ON d.id = c.destination_id
+    ORDER BY c.id DESC`).all(...(linkId ? [since, linkId] : [since]));
+}
+function exportLeadsCsv(res, linkId, since) {
+  const rows = leadRows(linkId, since);
+  const head = ['codigo_lead', 'primeiro_acesso', 'ultimo_acesso', 'cliques', 'link', 'slug', 'comercial', 'destino_url', ...UTM_FIELDS, 'dispositivo', 'origem'];
+  const lines = [head.join(';')];
+  for (const r of rows) {
+    lines.push([r.lead_code, localDateTimeStr(r.first_ts), localDateTimeStr(r.last_ts), r.clicks, r.link_name, r.slug,
+      r.dest_label || '', r.dest_url || r.target_url || '', ...UTM_FIELDS.map((f) => r[f]), r.device, r.referer].map(csvCell).join(';'));
+  }
+  const name = linkId ? `leads-${q.linkById.get(linkId)?.slug || linkId}` : 'leads-todos';
+  send(res, 200, '\uFEFF' + lines.join('\n'), {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${name}-${localDayStr(Date.now())}.csv"`,
+    'Cache-Control': 'no-store',
+  });
+}
+
 function exportCsv(res, id) {
   const link = q.linkById.get(id);
   if (!link) return json(res, 404, { error: 'Link não encontrado' });
   const dests = new Map(q.allDests.all(id).map((d) => [d.id, d.label]));
-  const lines = [['data_hora', 'destino', 'visitante', 'dispositivo', 'origem', 'bot', 'mesmo_comercial', ...UTM_FIELDS, 'parametros', 'user_agent'].join(';')];
+  const lines = [['data_hora', 'codigo_lead', 'destino', 'visitante', 'dispositivo', 'origem', 'bot', 'mesmo_comercial', ...UTM_FIELDS, 'parametros', 'user_agent'].join(';')];
   for (const r of db.prepare('SELECT * FROM clicks WHERE link_id = ? ORDER BY id').iterate(id)) {
-    lines.push([localDateTimeStr(r.ts), r.destination_id ? dests.get(r.destination_id) : link.target_url, r.visitor_id, r.device, r.referer, r.is_bot ? 'sim' : 'nao', r.sticky_hit ? 'sim' : 'nao', ...UTM_FIELDS.map((f) => r[f]), r.query, r.user_agent].map(csvCell).join(';'));
+    lines.push([localDateTimeStr(r.ts), r.lead_code, r.destination_id ? dests.get(r.destination_id) : link.target_url, r.visitor_id, r.device, r.referer, r.is_bot ? 'sim' : 'nao', r.sticky_hit ? 'sim' : 'nao', ...UTM_FIELDS.map((f) => r[f]), r.query, r.user_agent].map(csvCell).join(';'));
   }
   send(res, 200, '﻿' + lines.join('\n'), {
     'Content-Type': 'text/csv; charset=utf-8',
@@ -594,6 +678,24 @@ async function handleApi(req, res, url) {
 
   if (p === '/api/me' && m === 'GET') return json(res, 200, { ok: true, base_url: baseUrl(req) });
   if (p === '/api/links' && m === 'GET') return json(res, 200, listLinks());
+  if (p === '/api/leads.csv' && m === 'GET') {
+    const days = parseInt(url.searchParams.get('days') ?? '0', 10) || 0;
+    return exportLeadsCsv(res, null, rangeStart(days));
+  }
+  if (p === '/api/lookup' && m === 'GET') {
+    const code = String(url.searchParams.get('code') || '').trim().replace(/^#/, '').toUpperCase();
+    if (!code) return json(res, 400, { error: 'Informe o código' });
+    const row = db.prepare(`
+      SELECT c.lead_code, c.link_id, l.name link_name, l.slug, d.label dest_label, d.url dest_url, c.device, c.referer,
+        ${UTM_FIELDS.map((f) => `c.${f}`).join(', ')},
+        (SELECT MIN(ts) FROM clicks WHERE lead_code = c.lead_code) first_ts,
+        (SELECT MAX(ts) FROM clicks WHERE lead_code = c.lead_code) last_ts,
+        (SELECT COUNT(*) FROM clicks WHERE lead_code = c.lead_code) clicks
+      FROM clicks c JOIN links l ON l.id = c.link_id LEFT JOIN destinations d ON d.id = c.destination_id
+      WHERE c.lead_code = ? ORDER BY c.id LIMIT 1`).get(code);
+    if (!row) return json(res, 404, { error: `Código ${code} não encontrado.` });
+    return json(res, 200, { ...row, first: localDateTimeStr(row.first_ts), last: localDateTimeStr(row.last_ts) });
+  }
   if (p === '/api/links' && m === 'POST') {
     const data = validateLink(await readJson(req));
     const id = saveLink(data);
@@ -601,7 +703,7 @@ async function handleApi(req, res, url) {
   }
 
   let mm;
-  if ((mm = p.match(/^\/api\/links\/(\d+)(\/stats|\/clicks\.csv|\/toggle)?$/))) {
+  if ((mm = p.match(/^\/api\/links\/(\d+)(\/stats|\/clicks\.csv|\/leads\.csv|\/toggle)?$/))) {
     const id = Number(mm[1]);
     const sub = mm[2] || '';
     const link = q.linkById.get(id);
@@ -629,6 +731,10 @@ async function handleApi(req, res, url) {
       return json(res, 200, linkStats(id, days));
     }
     if (sub === '/clicks.csv' && m === 'GET') return exportCsv(res, id);
+    if (sub === '/leads.csv' && m === 'GET') {
+      const days = parseInt(url.searchParams.get('days') ?? '0', 10) || 0;
+      return exportLeadsCsv(res, id, rangeStart(days));
+    }
   }
   return json(res, 404, { error: 'Rota não encontrada' });
 }

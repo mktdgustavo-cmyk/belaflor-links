@@ -17,6 +17,11 @@ Zero dependências: só precisa de **Node.js 22.13+** (usa o SQLite que já vem 
 - **Grava as UTMs recebidas**: quem acessa `links.../comercial?utm_source=facebook&utm_campaign=bf26` tem `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term`, `src`, `sck` e `coupon` salvos no clique.
   - O painel mostra o ranking por campo e por combinação source / medium / campaign. Na rotação, mostra também quantos leads de cada UTM foram para cada comercial.
   - As UTMs saem no CSV e na lista de últimos acessos.
+- **Código do lead + exportação**: cada acesso ganha um código (ex: `K7Q3X`) que vai na mensagem automática do WhatsApp, como em *"Olá! Vim pelo link da Bela Flor. (Código: {codigo})"*.
+  - Variáveis da mensagem: `{codigo}`, `{comercial}`, `{utm_source}`, `{utm_medium}`, `{utm_campaign}`, `{utm_content}`, `{utm_term}`, `{cupom}`.
+  - A mesma pessoa clicando de novo no mesmo comercial mantém o código.
+  - **Exportar leads** (por link ou todos): uma linha por lead com código, data, comercial que recebeu, UTMs, dispositivo e origem.
+  - **Buscar código** no painel: o comercial digita o código da mensagem e vê de onde veio o lead.
 - **Análise**: cliques, pessoas únicas, distribuição real × meta por comercial, cliques por dia, origem, dispositivo, horário e últimos acessos, além de exportação CSV.
   - Prévias de robôs (WhatsApp, Facebook, Telegram…) são **filtradas** e não contam nem consomem a rotação.
 
