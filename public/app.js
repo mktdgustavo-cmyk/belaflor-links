@@ -481,17 +481,18 @@
         ${l.type === 'rotator'
           ? `<div class="card stat"><div class="label">Voltaram ao mesmo comercial</div><div class="value">${fmt(s.totals.sticky_hits)}</div><div class="hint">cliques repetidos que não consumiram a vez</div></div>`
           : `<div class="card stat"><div class="label">Hoje</div><div class="value">${fmt(s.series.at(-1)?.clicks || 0)}</div><div class="hint">${fmt(s.series.at(-1)?.uniques || 0)} pessoas</div></div>`}
-        <div class="card stat"><div class="label">Robôs / prévias</div><div class="value">${fmt(s.totals.bots)}</div><div class="hint">ignorados (WhatsApp, Facebook…)</div></div>
+        <div class="card stat"><div class="label">Acessos ignorados</div><div class="value">${fmt(s.totals.bots + s.totals.prefetches)}</div><div class="hint">${fmt(s.totals.bots)} robôs/prévias · ${fmt(s.totals.prefetches)} pré-carregamentos</div></div>
       </div>
 
       ${l.type === 'rotator' ? `
       <div class="card">
         <div class="card-pad" style="padding-bottom:8px"><div class="card-head" style="margin:0"><div><h2>Distribuição por comercial</h2>
-          <div class="muted small">A linha vertical indica a meta (%) configurada. A rotação segue a meta em sequência, não por sorteio.</div></div></div></div>
+          <div class="muted small"><b>Leads novos</b> = vezes que a rotação entregou alguém para o comercial (cliques repetidos da mesma pessoa não contam). O <b>Real</b> é calculado sobre os leads novos. A linha vertical é a meta.</div></div></div></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Destino</th><th class="num">Meta</th><th class="num">Real</th><th style="min-width:180px">Real × meta</th><th class="num">Cliques</th><th class="num">Pessoas</th></tr></thead>
+          <thead><tr><th>Destino</th><th class="num">Meta</th><th class="num">Real</th><th style="min-width:160px">Real × meta</th><th class="num">Leads novos</th><th class="num">Cliques</th><th class="num">Pessoas</th><th class="num" title="Leads entregues desde a última vez que o link foi salvo">Desde a última edição</th></tr></thead>
           <tbody>${dests.length ? dests.map((d) => {
-            const real = total ? (d.clicks / total) * 100 : 0;
+            const assignedTotal = dests.reduce((a, x) => a + x.assigned, 0);
+            const real = assignedTotal ? (d.assigned / assignedTotal) * 100 : 0;
             return `<tr>
               <td><div class="toolbar" style="gap:8px"><span class="swatch" style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${d.color}"></span>
                 <b>${esc(d.label)}</b>${d.deleted ? ' <span class="badge badge-off">removido</span>' : !d.active ? ' <span class="badge badge-off">pausado</span>' : ''}</div>
@@ -499,10 +500,12 @@
               <td class="num">${pct(d.target_pct)}</td>
               <td class="num"><b>${pct(real)}</b></td>
               <td><div class="hbar"><div class="track"><div class="fill" style="width:${Math.min(100, real)}%;background:${d.color}"></div>${d.target_pct ? `<div class="target" style="left:${Math.min(100, d.target_pct)}%"></div>` : ''}</div></div></td>
+              <td class="num"><b>${fmt(d.assigned)}</b></td>
               <td class="num">${fmt(d.clicks)}</td>
               <td class="num">${fmt(d.uniques)}</td>
+              <td class="num muted">${d.since_edit === null ? '—' : fmt(d.since_edit)}</td>
             </tr>`;
-          }).join('') : '<tr><td colspan="6" class="muted">Nenhum destino.</td></tr>'}</tbody>
+          }).join('') : '<tr><td colspan="8" class="muted">Nenhum destino.</td></tr>'}</tbody>
         </table></div>
       </div>` : `
       <div class="card card-pad">
@@ -533,6 +536,16 @@
       </div>
 
       <div class="card">
+        <div class="card-pad" style="padding-bottom:8px"><h2>Acessos ignorados</h2>
+          <div class="muted small">Não contam como clique e não consomem a vez de nenhum comercial. Se aparecer aqui um navegador de pessoa real, avise o suporte.</div></div>
+        <div class="table-wrap"><table><thead><tr><th>Tipo</th><th>User-agent</th><th class="num">Acessos</th></tr></thead><tbody>
+          ${(s.ignored_uas || []).length ? s.ignored_uas.map((u) => `<tr><td class="nowrap">${u.kind === 2 ? '<span class="badge badge-warn">pré-carregamento</span>' : '<span class="badge badge-off">robô/prévia</span>'}</td>
+            <td class="mono small" style="word-break:break-all">${esc(u.ua)}</td><td class="num">${fmt(u.n)}</td></tr>`).join('')
+          : '<tr><td colspan="3" class="muted">Nenhum acesso ignorado no período.</td></tr>'}
+        </tbody></table></div>
+      </div>
+
+      <div class="card">
         <div class="card-pad" style="padding-bottom:8px"><h2>Últimos acessos</h2></div>
         <div class="table-wrap"><table>
           <thead><tr><th>Quando</th><th>Código</th>${l.type === 'rotator' ? '<th>Destino</th>' : ''}<th>Dispositivo</th><th>Origem</th><th>UTMs recebidas</th><th></th></tr></thead>
@@ -543,7 +556,7 @@
             <td>${esc(devLabel[r.device] || r.device || '—')}</td>
             <td>${esc(r.referer || '(direto / app)')}</td>
             <td class="small" title="${esc(r.query || '')}">${utmBadges(r) || `<span class="muted">${r.query ? esc(r.query.slice(0, 60)) : '—'}</span>`}</td>
-            <td>${r.is_bot ? '<span class="badge badge-off">robô/prévia</span>' : r.sticky_hit ? '<span class="badge badge-rot">retorno</span>' : ''}</td>
+            <td>${r.is_bot === 2 ? '<span class="badge badge-warn">pré-carregamento</span>' : r.is_bot ? '<span class="badge badge-off">robô/prévia</span>' : r.sticky_hit ? '<span class="badge badge-rot">retorno</span>' : ''}</td>
           </tr>`).join('') : `<tr><td colspan="7"><div class="empty">Nenhum acesso ainda. Compartilhe o link: <span class="mono">${esc(url)}</span></div></td></tr>`}</tbody>
         </table></div>
       </div>`);

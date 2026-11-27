@@ -24,6 +24,9 @@ Zero dependências: só precisa de **Node.js 22.13+** (usa o SQLite que já vem 
   - **Buscar código** no painel: o comercial digita o código da mensagem e vê de onde veio o lead.
 - **Análise**: cliques, pessoas únicas, distribuição real × meta por comercial, cliques por dia, origem, dispositivo, horário e últimos acessos, além de exportação CSV.
   - Prévias de robôs (WhatsApp, Facebook, Telegram…) são **filtradas** e não contam nem consomem a rotação.
+  - **Pré-carregamentos** (prefetch dos anúncios do Facebook/Instagram e do Chrome, identificados pelos headers `Purpose`, `Sec-Purpose`, `X-Purpose` e `X-Moz`) recebem uma página de redirecionamento: não contam, não consomem a vez e não geram código. Quando a pessoa realmente abre, ela entra na rotação normalmente.
+  - Navegadores dentro de apps (Instagram, Facebook, TikTok, Telegram, LinkedIn, Pinterest) contam como pessoas.
+  - O painel mostra os **leads novos** por comercial (o que a rotação de fato entregou), a contagem desde a última edição e a lista de **acessos ignorados**, para auditoria.
 
 ## Deploy no Easypanel
 

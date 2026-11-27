@@ -140,9 +140,22 @@ const q = {
 };
 
 // ---------------------------------------------------------------- helpers
-const BOT_RE = /bot\b|bot\/|crawl|spider|slurp|facebookexternalhit|facebookcatalog|meta-externalagent|whatsapp|telegram|preview|skypeuripreview|discord|linkedin|embedly|vkshare|pinterest|inspectiontool|headless|lighthouse|curl\/|wget|python-requests|python-urllib|axios|go-http-client|okhttp|java\/|node-fetch|undici/i;
+// Robôs conhecidos (prévias de link, buscadores, ferramentas). Navegadores de apps
+// (Instagram, Facebook, TikTok, Telegram, LinkedIn, Pinterest...) são pessoas.
+const BOT_RE = /googlebot|bingbot|yandex(bot|images)|baiduspider|duckduckbot|applebot|slurp|facebookexternalhit|facebookcatalog|meta-external(agent|fetcher)|whatsapp\/|telegrambot|twitterbot|linkedinbot|discordbot|slackbot|pinterestbot|skypeuripreview|embedly|vkshare|redditbot|google-inspectiontool|adsbot|mediapartners|headlesschrome|lighthouse|petalbot|semrushbot|ahrefsbot|mj12bot|bytespider|gptbot|claudebot|ccbot|crawler|spider|\bbot\b|[a-z]bot\/\d/i;
 
-function isBot(ua) { return !ua || BOT_RE.test(ua); }
+function isBot(ua) {
+  if (!ua) return true;
+  if (!/^Mozilla\//.test(ua)) return true; // todo navegador real começa com Mozilla/
+  return BOT_RE.test(ua);
+}
+/** Pré-carregamento (prefetch) do Facebook/Instagram/Chrome: não é um clique. */
+function isPrefetch(req) {
+  const h = req.headers;
+  const v = [h['purpose'], h['sec-purpose'], h['x-purpose'], h['x-moz']].filter(Boolean).join(' ');
+  return /prefetch|preview|prerender/i.test(v);
+}
+const PREFETCH_MARK = '_bfnav';
 function deviceOf(ua = '') {
   if (/ipad|tablet/i.test(ua)) return 'tablet';
   if (/mobi|android|iphone|ipod/i.test(ua)) return 'mobile';
@@ -323,6 +336,25 @@ function handleRedirect(req, res, slug, searchParams) {
   if (!link || !link.active) return notFound(res);
 
   const ua = String(req.headers['user-agent'] || '').slice(0, 400);
+  const confirmedNav = searchParams.get(PREFETCH_MARK) === '1';
+  searchParams.delete(PREFETCH_MARK);
+
+  // Prefetch: responde uma página que só redireciona quando a pessoa realmente abrir.
+  // Não conta clique, não consome a vez de nenhum comercial e não gera código.
+  if (!confirmedNav && req.method === 'GET' && isPrefetch(req)) {
+    try {
+      q.insertClick.run(link.id, null, Date.now(), null, null, ua, '', deviceOf(ua), 2, 0, null, null, ...UTM_FIELDS.map((f) => cleanUtm(searchParams.get(f))));
+    } catch (e) { console.error('Erro ao registrar prefetch:', e.message); }
+    const sp = new URLSearchParams(searchParams);
+    sp.set(PREFETCH_MARK, '1');
+    const next = `/${encodeURIComponent(link.slug)}?${sp.toString()}`;
+    const nextAttr = next.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    return send(res, 200, `<!doctype html><html><head><meta charset="utf-8"><meta name="robots" content="noindex">
+<meta http-equiv="refresh" content="0;url=${nextAttr}"><title>Redirecionando…</title></head>
+<body><script>location.replace(${JSON.stringify(next)})</script><a href="${nextAttr}">Continuar</a></body></html>`,
+      { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate, private' });
+  }
+
   const bot = req.method === 'HEAD' || isBot(ua);
   const cookies = parseCookies(req);
   const secure = isHttps(req);
@@ -525,6 +557,9 @@ function linkStats(id, days) {
   const W = 'FROM clicks WHERE link_id = ? AND ts >= ? AND is_bot = 0';
   const totals = db.prepare(`SELECT COUNT(*) clicks, COUNT(DISTINCT visitor_id) uniques ${W}`).get(id, since);
   const bots = db.prepare('SELECT COUNT(*) n FROM clicks WHERE link_id = ? AND ts >= ? AND is_bot = 1').get(id, since).n;
+  const prefetches = db.prepare('SELECT COUNT(*) n FROM clicks WHERE link_id = ? AND ts >= ? AND is_bot = 2').get(id, since).n;
+  const ignoredUas = db.prepare(`SELECT is_bot kind, COALESCE(NULLIF(user_agent,''),'(sem user-agent)') ua, COUNT(*) n
+    FROM clicks WHERE link_id = ? AND ts >= ? AND is_bot > 0 GROUP BY kind, ua ORDER BY n DESC LIMIT 12`).all(id, since);
   const stickyHits = db.prepare(`SELECT COUNT(*) n ${W} AND sticky_hit = 1`).get(id, since).n;
   const dayExpr = `strftime('%Y-%m-%d', (ts + ${OFF_MS}) / 1000, 'unixepoch')`;
   const daily = db.prepare(`SELECT ${dayExpr} day, COUNT(*) clicks, COUNT(DISTINCT visitor_id) uniques ${W} GROUP BY day ORDER BY day`).all(id, since);
@@ -571,12 +606,13 @@ function linkStats(id, days) {
   let destinations = [];
   if (link.type === 'rotator') {
     const all = q.allDests.all(id);
-    const by = new Map(db.prepare(`SELECT destination_id, COUNT(*) clicks, COUNT(DISTINCT visitor_id) uniques ${W} GROUP BY destination_id`).all(id, since).map((r) => [r.destination_id, r]));
+    const by = new Map(db.prepare(`SELECT destination_id, COUNT(*) clicks, COUNT(DISTINCT visitor_id) uniques, SUM(sticky_hit = 0) assigned ${W} GROUP BY destination_id`).all(id, since).map((r) => [r.destination_id, r]));
     const activeSum = all.filter((d) => !d.deleted && d.active).reduce((s, d) => s + d.weight, 0) || 1;
     destinations = all.map((d) => ({
       id: d.id, label: d.label, url: d.url, active: !!d.active, deleted: !!d.deleted, weight: d.weight,
       target_pct: !d.deleted && d.active ? (d.weight / activeSum) * 100 : 0,
-      clicks: by.get(d.id)?.clicks || 0, uniques: by.get(d.id)?.uniques || 0,
+      clicks: by.get(d.id)?.clicks || 0, uniques: by.get(d.id)?.uniques || 0, assigned: by.get(d.id)?.assigned || 0,
+      since_edit: d.deleted ? null : d.rr_count,
     })).filter((d) => !d.deleted || d.clicks > 0);
     const seriesIdx = new Map(series.map((s) => [s.day, s]));
     for (const r of db.prepare(`SELECT ${dayExpr} day, destination_id, COUNT(*) n ${W} GROUP BY day, destination_id`).all(id, since)) {
@@ -587,7 +623,8 @@ function linkStats(id, days) {
 
   return {
     link: linkPayload(link), days,
-    totals: { clicks: totals.clicks, uniques: totals.uniques, bots, sticky_hits: stickyHits },
+    totals: { clicks: totals.clicks, uniques: totals.uniques, bots, prefetches, sticky_hits: stickyHits },
+    ignored_uas: ignoredUas,
     series, destinations, referers, devices, utm, utm_tagged: utmTagged,
     hours: Array.from({ length: 24 }, (_, h) => hours.find((x) => x.h === h)?.n || 0),
     recent: recent.map((r) => ({ ...r, when: localDateTimeStr(r.ts) })),
